@@ -1,0 +1,79 @@
+name: validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  PROMETHEUS_IMAGE: prom/prometheus:v3.5.0
+  ALERTMANAGER_IMAGE: prom/alertmanager:v0.28.1
+  LOKI_IMAGE: grafana/loki:3.5.3
+  ALLOY_IMAGE: grafana/alloy:v1.10.0
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: yamllint
+        run: pipx run yamllint --strict .
+
+      - name: Prometheus config
+        run: >
+          docker run --rm -v "$PWD/prometheus:/etc/prometheus:ro"
+          --entrypoint promtool $PROMETHEUS_IMAGE
+          check config /etc/prometheus/prometheus.yml
+
+      - name: Alert and recording rules
+        run: >
+          docker run --rm -v "$PWD/prometheus:/etc/prometheus:ro"
+          --entrypoint promtool $PROMETHEUS_IMAGE
+          check rules /etc/prometheus/rules/alerts.yml /etc/prometheus/rules/recording.yml
+
+      - name: Alert rule unit tests
+        run: >
+          docker run --rm -v "$PWD:/repo:ro" -w /repo/tests
+          --entrypoint promtool $PROMETHEUS_IMAGE
+          test rules alerts_test.yml
+
+      - name: Alertmanager config
+        run: >
+          docker run --rm -v "$PWD/alertmanager:/etc/alertmanager:ro"
+          --entrypoint amtool $ALERTMANAGER_IMAGE
+          check-config /etc/alertmanager/alertmanager.yml
+
+      - name: Loki config
+        run: >
+          docker run --rm -v "$PWD/loki/loki.yml:/etc/loki/loki.yml:ro"
+          $LOKI_IMAGE -config.file=/etc/loki/loki.yml -verify-config
+
+      - name: Alloy config
+        run: >
+          docker run --rm -v "$PWD/alloy/config.alloy:/etc/alloy/config.alloy:ro"
+          $ALLOY_IMAGE fmt /etc/alloy/config.alloy
+
+      - name: Grafana dashboards are valid JSON with unique UIDs
+        run: |
+          python3 - <<'EOF'
+          import json, pathlib, sys
+          uids = {}
+          for f in sorted(pathlib.Path("grafana/dashboards").glob("*.json")):
+              d = json.loads(f.read_text())
+              uid = d.get("uid") or sys.exit(f"{f}: missing uid")
+              if uid in uids:
+                  sys.exit(f"{f}: uid {uid} already used by {uids[uid]}")
+              uids[uid] = f
+              print(f"ok {f} ({len(d['panels'])} panels)")
+          EOF
+
+      - name: Compose file
+        env:
+          GRAFANA_ADMIN_PASSWORD: ci-only
+        run: |
+          docker compose config -q
+          docker compose --profile demo config -q
