@@ -1,0 +1,202 @@
+name: observability
+
+x-defaults: &defaults
+  restart: unless-stopped
+  networks: [observability]
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+
+services:
+  prometheus:
+    <<: *defaults
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 1g }
+
+  alertmanager:
+    <<: *defaults
+    image: prom/alertmanager:v0.28.1
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./alertmanager:/etc/alertmanager:ro
+      - alertmanager-data:/alertmanager
+    ports:
+      - "9093:9093"
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9093/-/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 128m }
+
+  grafana:
+    <<: *defaults
+    image: grafana/grafana:12.1.0
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/host-overview.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      prometheus: { condition: service_healthy }
+      loki: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 512m }
+
+  loki:
+    <<: *defaults
+    image: grafana/loki:3.5.3
+    command: -config.file=/etc/loki/loki.yml
+    volumes:
+      - ./loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3100/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 512m }
+
+  alloy:
+    <<: *defaults
+    image: grafana/alloy:v1.10.0
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-data:/var/lib/alloy/data
+    ports:
+      - "12345:12345"
+    depends_on:
+      loki: { condition: service_healthy }
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 256m }
+
+  node-exporter:
+    <<: *defaults
+    image: prom/node-exporter:v1.9.1
+    command:
+      - --path.rootfs=/host
+      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|run|var/lib/docker/.+)($$|/)
+    volumes:
+      - /:/host:ro,rslave
+    pid: host
+    deploy:
+      resources:
+        limits: { cpus: "0.2", memory: 64m }
+
+  cadvisor:
+    <<: *defaults
+    image: gcr.io/cadvisor/cadvisor:v0.52.1
+    privileged: true
+    devices:
+      - /dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=15s
+      - --disable_metrics=percpu,sched,tcp,udp,hugetlb,referenced_memory,cpu_topology,resctrl
+    deploy:
+      resources:
+        limits: { cpus: "0.3", memory: 256m }
+
+  blackbox-exporter:
+    <<: *defaults
+    image: prom/blackbox-exporter:v0.27.0
+    command: --config.file=/etc/blackbox/blackbox.yml
+    volumes:
+      - ./blackbox/blackbox.yml:/etc/blackbox/blackbox.yml:ro
+    deploy:
+      resources:
+        limits: { cpus: "0.2", memory: 64m }
+
+  # Sample workload with real RED metrics. Start with: docker compose --profile demo up -d
+  shortener:
+    <<: *defaults
+    profiles: [demo]
+    image: ghcr.io/shivanjalikaname/url-shortener-service:latest
+    environment:
+      BASE_URL: http://localhost:8000
+    ports:
+      - "8000:8000"
+    read_only: true
+
+  # Generates steady traffic (and some 404s) against the demo app so dashboards have data
+  traffic:
+    <<: *defaults
+    profiles: [demo]
+    image: curlimages/curl:8.15.0
+    depends_on: [shortener]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          code=$$(curl -s -X POST http://shortener:8000/api/v1/links \
+            -H 'content-type: application/json' \
+            -d '{"url":"https://example.com/'$$RANDOM'"}' | sed -n 's/.*"code":"\([^"]*\)".*/\1/p')
+          curl -s -o /dev/null http://shortener:8000/$$code
+          curl -s -o /dev/null http://shortener:8000/missing-$$RANDOM
+          sleep 1
+        done
+
+networks:
+  observability:
+
+volumes:
+  prometheus-data:
+  alertmanager-data:
+  grafana-data:
+  loki-data:
+  alloy-data:
