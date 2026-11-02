@@ -1,0 +1,100 @@
+groups:
+  - name: availability
+    rules:
+      - alert: InstanceDown
+        expr: up{optional!="true"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} target {{ $labels.instance }} is down"
+          description: "Prometheus has failed to scrape {{ $labels.instance }} for more than 2 minutes."
+          runbook_url: https://github.com/shivanjalikaname/observability-stack/blob/main/docs/runbooks.md#instancedown
+
+      - alert: EndpointDown
+        expr: probe_success{optional!="true"} == 0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Synthetic check failing for {{ $labels.instance }}"
+          description: "Blackbox HTTP probe to {{ $labels.instance }} has failed for 3 minutes."
+          runbook_url: https://github.com/shivanjalikaname/observability-stack/blob/main/docs/runbooks.md#endpointdown
+
+      - alert: TLSCertificateExpiringSoon
+        expr: (probe_ssl_earliest_cert_expiry - time()) / 86400 < 14
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "TLS certificate for {{ $labels.instance }} expires in {{ $value | humanize }} days"
+          description: "Renew the certificate before it expires to avoid an outage."
+          runbook_url: https://github.com/shivanjalikaname/observability-stack/blob/main/docs/runbooks.md#tlscertificateexpiringsoon
+
+  - name: host
+    rules:
+      - alert: HighCPUUsage
+        expr: instance:node_cpu_utilisation:ratio > 0.9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU on {{ $labels.instance }} above 90% for 10 minutes"
+          description: "Current utilisation is {{ $value | humanizePercentage }}."
+          runbook_url: https://github.com/shivanjalikaname/observability-stack/blob/main/docs/runbooks.md#highcpuusage
+
+      - alert: HighMemoryUsage
+        expr: instance:node_memory_utilisation:ratio > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Memory on {{ $labels.instance }} above 90%"
+          description: "Current utilisation is {{ $value | humanizePercentage }}."
+          runbook_url: https://github.com/shivanjalikaname/observability-stack/blob/main/docs/runbooks.md#highmemoryusage
+
+      - alert: DiskWillFillIn4Hours
+        # Only alert when the trend is real: at least 1h of data and under 25% free already
+        expr: |
+          predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"}[1h], 4 * 3600) < 0
+            and instance_mountpoint:node_filesystem_avail:ratio < 0.25
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.mountpoint }} on {{ $labels.instance }} will fill within 4 hours"
+          description: "Free space is trending to zero based on the last hour of growth."
+          runbook_url: https://github.com/shivanjalikaname/observability-stack/blob/main/docs/runbooks.md#diskwillfillin4hours
+
+  - name: containers
+    rules:
+      - alert: ContainerOOMKilled
+        expr: increase(container_oom_events_total{name!=""}[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container {{ $labels.name }} was OOM-killed"
+          description: "The kernel killed {{ $labels.name }} for exceeding its memory limit in the last 10 minutes."
+          runbook_url: https://github.com/shivanjalikaname/observability-stack/blob/main/docs/runbooks.md#containeroomkilled
+
+  - name: service
+    rules:
+      - alert: HighHTTP5xxRate
+        expr: service:http_errors_5xx:ratio_rate5m > 0.05 and service:http_requests:rate5m > 0.1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} is returning more than 5% 5xx errors"
+          description: "Error ratio is {{ $value | humanizePercentage }} over the last 5 minutes."
+          runbook_url: https://github.com/shivanjalikaname/observability-stack/blob/main/docs/runbooks.md#highhttp5xxrate
+
+      - alert: HighLatencyP95
+        expr: service:http_request_duration_seconds:p95_5m > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.job }} p95 latency above 500ms"
+          description: "p95 latency is {{ $value | humanizeDuration }}."
+          runbook_url: https://github.com/shivanjalikaname/observability-stack/blob/main/docs/runbooks.md#highlatencyp95

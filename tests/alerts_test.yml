@@ -1,0 +1,104 @@
+rule_files:
+  - ../prometheus/rules/recording.yml
+  - ../prometheus/rules/alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: InstanceDown fires for required targets and ignores optional ones
+    interval: 1m
+    input_series:
+      - series: 'up{job="node", instance="docker-host"}'
+        values: "1 1 0 0 0 0"
+      - series: 'up{job="shortener", instance="shortener:8000", optional="true"}'
+        values: "0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: InstanceDown
+        exp_alerts: []  # still pending: only down for 1 minute
+      - eval_time: 5m
+        alertname: InstanceDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: node
+              instance: docker-host
+            exp_annotations:
+              summary: "node target docker-host is down"
+              description: "Prometheus has failed to scrape docker-host for more than 2 minutes."
+              runbook_url: https://github.com/shivanjalikaname/observability-stack/blob/main/docs/runbooks.md#instancedown
+
+  - name: HighHTTP5xxRate fires when errors exceed 5% of traffic
+    interval: 1m
+    input_series:
+      # 1 req/s success, 0.2 req/s errors -> 16.67% error ratio
+      - series: 'http_requests_total{job="shortener", method="GET", route="/{code}", status="200"}'
+        values: "0+60x30"
+      - series: 'http_requests_total{job="shortener", method="GET", route="/{code}", status="500"}'
+        values: "0+12x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: HighHTTP5xxRate
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: shortener
+            exp_annotations:
+              summary: "shortener is returning more than 5% 5xx errors"
+              description: "Error ratio is 16.67% over the last 5 minutes."
+              runbook_url: https://github.com/shivanjalikaname/observability-stack/blob/main/docs/runbooks.md#highhttp5xxrate
+
+  - name: HighHTTP5xxRate stays quiet for healthy traffic
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="shortener", method="GET", route="/{code}", status="200"}'
+        values: "0+60x30"
+      - series: 'http_requests_total{job="shortener", method="GET", route="/{code}", status="500"}'
+        values: "0+1x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: HighHTTP5xxRate
+        exp_alerts: []
+
+  - name: DiskWillFillIn4Hours fires on a steady fill trend
+    interval: 1m
+    input_series:
+      - series: 'node_filesystem_avail_bytes{instance="docker-host", mountpoint="/", fstype="ext4"}'
+        values: "10000-100x120"
+      - series: 'node_filesystem_size_bytes{instance="docker-host", mountpoint="/", fstype="ext4"}'
+        values: "100000x120"
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: DiskWillFillIn4Hours
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: docker-host
+              mountpoint: /
+              fstype: ext4
+            exp_annotations:
+              summary: "/ on docker-host will fill within 4 hours"
+              description: "Free space is trending to zero based on the last hour of growth."
+              runbook_url: https://github.com/shivanjalikaname/observability-stack/blob/main/docs/runbooks.md#diskwillfillin4hours
+
+  - name: TLSCertificateExpiringSoon fires inside the 14 day window
+    interval: 1m
+    input_series:
+      # expiry timestamp 10 days after the test epoch
+      - series: 'probe_ssl_earliest_cert_expiry{job="blackbox-http", instance="https://example.com"}'
+        values: "864000x120"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: TLSCertificateExpiringSoon
+        exp_alerts: []  # pending, needs 1h
+      - eval_time: 70m
+        alertname: TLSCertificateExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: blackbox-http
+              instance: https://example.com
+            exp_annotations:
+              summary: "TLS certificate for https://example.com expires in 9.951 days"
+              description: "Renew the certificate before it expires to avoid an outage."
+              runbook_url: https://github.com/shivanjalikaname/observability-stack/blob/main/docs/runbooks.md#tlscertificateexpiringsoon
