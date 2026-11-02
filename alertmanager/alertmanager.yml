@@ -1,0 +1,38 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: default
+  group_by: [alertname, job]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    # Critical alerts page quickly and repeat more often
+    - matchers: [severity="critical"]
+      receiver: oncall
+      group_wait: 10s
+      repeat_interval: 1h
+    - matchers: [severity="warning"]
+      receiver: default
+
+inhibit_rules:
+  # A critical alert on an instance makes its warnings noise
+  - source_matchers: [severity="critical"]
+    target_matchers: [severity="warning"]
+    equal: [instance]
+  # If the target is down, don't also alert on its synthetic check
+  - source_matchers: [alertname="InstanceDown"]
+    target_matchers: [alertname="EndpointDown"]
+    equal: [instance]
+
+receivers:
+  # Replace the URLs with your Slack/Teams/PagerDuty integration or an internal webhook.
+  - name: default
+    webhook_configs:
+      - url: http://host.docker.internal:9099/alerts/default
+        send_resolved: true
+  - name: oncall
+    webhook_configs:
+      - url: http://host.docker.internal:9099/alerts/oncall
+        send_resolved: true
